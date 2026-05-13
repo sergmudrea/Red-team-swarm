@@ -1,0 +1,9 @@
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /hive-agent ./cmd/hive
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /hive-agent /usr/local/bin/hive-agent
+ENTRYPOINT ["/usr/local/bin/hive-agent", "-mode=agent", "-config=/etc/hive/agent_config.json"]
