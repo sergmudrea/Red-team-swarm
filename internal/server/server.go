@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/tls"
 	"embed"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/blackswarm/hive/internal/protocol"
 )
 
 //go:embed web/build
@@ -32,13 +35,54 @@ func NewServer(addr string, handler *AgentHandler, logger *slog.Logger) *Server 
 	}
 }
 
-// Start begins listening for TLS connections. If server.crt and server.key exist,
-// TLS 1.3 is used; otherwise the server falls back to plain HTTP (not recommended for production).
+// Start begins listening for TLS connections.
 func (s *Server) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handler.ServeHTTP)
 
-	// Try to serve embedded operator UI; if missing, show a simple status page.
+	// REST API for the React dashboard
+	mux.HandleFunc("/api/agents", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		agents := s.handler.manager.ListAgents()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(agents)
+	})
+
+	mux.HandleFunc("/api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			AgentID string `json:"agent_id"`
+			Command string `json:"command"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.AgentID == "" || req.Command == "" {
+			http.Error(w, "agent_id and command are required", http.StatusBadRequest)
+			return
+		}
+		taskID := time.Now().Format("20060102150405.000") // simple unique id
+		task := protocol.TaskMsg{
+			TaskID:  taskID,
+			Command: req.Command,
+			Timeout: 0, // use default
+		}
+		if err := s.handler.SendTask(req.AgentID, task); err != nil {
+			http.Error(w, fmt.Sprintf("failed to send task: %v", err), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"task_id": taskID})
+	})
+
+	// Serve static React app
 	staticFS, err := fs.Sub(webAssets, "web/build")
 	if err != nil {
 		s.logger.Warn("embedded web assets not found, serving fallback page", "error", err)
@@ -58,7 +102,6 @@ func (s *Server) Start() error {
 		IdleTimeout:  30 * time.Second,
 	}
 
-	// Load TLS if certificates are available; otherwise warn and use plain HTTP.
 	certFile := "server.crt"
 	keyFile := "server.key"
 	if _, err := os.Stat(certFile); err == nil {
