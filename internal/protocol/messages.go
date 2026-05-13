@@ -1,6 +1,6 @@
 // Package protocol defines JSON message types exchanged between agent and server.
 package protocol
-
+import "encoding/json"
 // Message types used in the "type" field of a message wrapper.
 const (
 	TypeRegister = "register"
@@ -12,7 +12,7 @@ const (
 )
 
 // Message is a generic envelope for all WebSocket communication.
-type Message struct {
+type Envelope struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
