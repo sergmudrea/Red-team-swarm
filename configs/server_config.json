@@ -1,0 +1,7 @@
+{
+  "mode": "server",
+  "server_port": 8443,
+  "proxies": [],
+  "agent_id": "",
+  "secret_key": "generate-a-real-32-byte-key-and-keep-it-safe"
+}
