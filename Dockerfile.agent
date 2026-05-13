@@ -1,4 +1,20 @@
+FROM node:18-alpine AS web-builder
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web/ .
+RUN npm run build
+
 FROM golang:1.22-alpine AS builder
+WORKDIR /src
+COPY . .
+COPY --from=web-builder /web/build ./web/build
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /hive-agent ./cmd/hive
+
+FROM alpine:3.19
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /hive-agent /usr/local/bin/hive-agent
+ENTRYPOINT ["/usr/local/bin/hive-agent", "-mode=agent", "-config=/etc/hive/agent_config.json"]FROM golang:1.22-alpine AS builder
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /hive-agent ./cmd/hive
