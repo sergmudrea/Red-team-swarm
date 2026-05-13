@@ -1,20 +1,30 @@
-// Package agent implements the agent-side logic (command execution, SOCKS5 proxy, self-destruct).
 package agent
 
 import (
 	"bytes"
 	"context"
 	"os/exec"
+	"runtime"
 	"time"
 )
 
 // ExecuteCommand runs a shell command with the given timeout.
-// It returns captured stdout, stderr, and any error that occurred during execution.
+// It automatically selects the appropriate shell (sh on Unix, cmd on Windows).
 func ExecuteCommand(cmd string, timeout time.Duration) (stdout, stderr string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	var shell string
+	var shellArgs []string
+	if runtime.GOOS == "windows" {
+		shell = "cmd"
+		shellArgs = []string{"/c"}
+	} else {
+		shell = "sh"
+		shellArgs = []string{"-c"}
+	}
+
+	c := exec.CommandContext(ctx, shell, append(shellArgs, cmd)...)
 
 	var outBuf, errBuf bytes.Buffer
 	c.Stdout = &outBuf
