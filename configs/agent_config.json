@@ -1,0 +1,10 @@
+{
+  "mode": "agent",
+  "server_port": 8443,
+  "proxies": [
+    "proxy1.example.com",
+    "proxy2.example.com"
+  ],
+  "agent_id": "bee-001",
+  "secret_key": "generate-a-real-32-byte-key-and-keep-it-safe"
+}
