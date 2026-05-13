@@ -20,11 +20,50 @@ import (
 
 func main() {
 	mode := flag.String("mode", "", "run mode: agent or server")
-	configPath := flag.String("config", "", "path to encrypted configuration file")
+	configPath := flag.String("config", "", "path to configuration file")
+	encryptIn := flag.String("encrypt-in", "", "path to plaintext JSON config to encrypt")
+	encryptOut := flag.String("encrypt-out", "", "path to write encrypted config")
 	flag.Parse()
 
+	// Encrypt config mode
+	if *encryptIn != "" || *encryptOut != "" {
+		if *encryptIn == "" || *encryptOut == "" {
+			fmt.Fprintf(os.Stderr, "both -encrypt-in and -encrypt-out are required for encryption\n")
+			os.Exit(1)
+		}
+		keyEnv := os.Getenv("HIVE_CONFIG_KEY")
+		if keyEnv == "" {
+			fmt.Fprintf(os.Stderr, "HIVE_CONFIG_KEY environment variable not set\n")
+			os.Exit(1)
+		}
+		key := []byte(keyEnv)
+		if len(key) != 32 {
+			fmt.Fprintf(os.Stderr, "HIVE_CONFIG_KEY must be 32 bytes\n")
+			os.Exit(1)
+		}
+		// Load plain config (unencrypted JSON)
+		plain, err := os.ReadFile(*encryptIn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to read input file: %v\n", err)
+			os.Exit(1)
+		}
+		// Encrypt and write
+		ciphertext, err := crypto.Encrypt(plain, key)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "encryption failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(*encryptOut, ciphertext, 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write encrypted config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Config encrypted successfully.")
+		return
+	}
+
+	// Normal run modes
 	if *mode != "agent" && *mode != "server" {
-		fmt.Fprintf(os.Stderr, "usage: hive -mode=agent|server -config=<path>\n")
+		fmt.Fprintf(os.Stderr, "usage: hive -mode=agent|server -config=<path> [or use -encrypt-in/-encrypt-out]\n")
 		os.Exit(1)
 	}
 	if *configPath == "" {
@@ -35,8 +74,7 @@ func main() {
 	// Logger
 	logger := utils.NewLogger(slog.LevelInfo, os.Stdout)
 
-	// Load or generate encryption key
-	// For simplicity we read a key from env; production would use a hardware vault.
+	// Load encryption key
 	keyEnv := os.Getenv("HIVE_CONFIG_KEY")
 	if keyEnv == "" {
 		logger.Error("HIVE_CONFIG_KEY environment variable not set")
@@ -76,14 +114,12 @@ func main() {
 }
 
 func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
-	// Determine server URL: first proxy in list with wss scheme
 	if len(cfg.Proxies) == 0 {
 		logger.Error("at least one proxy domain must be configured")
 		return
 	}
 	serverURL := fmt.Sprintf("wss://%s/ws", cfg.Proxies[0])
 
-	// Optionally load client certificate from environment
 	var clientCert *tls.Certificate
 	if certFile := os.Getenv("AGENT_CERT_FILE"); certFile != "" {
 		keyFile := os.Getenv("AGENT_KEY_FILE")
@@ -107,7 +143,6 @@ func runAgent(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
 }
 
 func runServer(ctx context.Context, cfg *config.Config, logger *slog.Logger) {
-	// Create agent manager and handler
 	manager := &server.AgentManager{}
 	handler := server.NewAgentHandler(manager, logger)
 
